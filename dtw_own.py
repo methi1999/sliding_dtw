@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 
 round_f = 6
 
+
 # distance function used for cost
 def distance(x, y, func='euclidean'):
     # print(x.shape, y.shape)
@@ -22,8 +23,8 @@ def distance(x, y, func='euclidean'):
 
 # calculate DTW path and min cost between s1 and s2
 # distances[i,j] = distance between ith element of s1 and jth element of s2
-# if provided, use it. We provided it durign DTW to reduce multiple calls to the distance function
-def dtw_own(s1, s2, distances=None):
+# if provided, use it. We provided it during DTW to reduce multiple calls to the distance function
+def dtw_own(s1, s2, distances=None, return_path=False):
     m, n = len(s1), len(s2)
 
     if distances is not None:
@@ -55,60 +56,90 @@ def dtw_own(s1, s2, distances=None):
     cost = np.around(cost, decimals=round_f)
     # print(cost, distances)
     # exit(0)
-    # path = []
-    # i, j = m-1, n-1
-    # #back track to find the actual path
-    # while i>=0 and j>=0:
-    # 	path.append((i,j))
-    # 	# print(i,j)
-    # 	if i == 0:
-    # 		j -= 1
-    # 	elif j == 0:
-    # 		i -= 1
-    # 	else:
-    # 		cur = min(cost[i-1, j-1], cost[i-1, j], cost[i, j-1])
-    # 		# print(cur)
-    # 		if cost[i-1, j] == cur:
-    # 			i = i - 1
-    # 		elif cost[i, j-1] == cur:
-    # 			j = j-1
-    # 		elif cost[i-1,j-1] == cur:
-    # 			i -= 1
-    # 			j -= 1
-    # 		else:
-    # 			print("Kuch to gadbad hai at",i,j)
-    # 			exit(0)
+    if return_path:
+        path = []
+        i, j = m - 1, n - 1
+        # back track to find the actual path
+        while i >= 0 and j >= 0:
+            path.append((i, j))
+            # print(i,j)
+            if i == 0:
+                j -= 1
+            elif j == 0:
+                i -= 1
+            else:
+                cur = min(cost[i - 1, j - 1], cost[i - 1, j], cost[i, j - 1])
+                # print(cur)
+                if cost[i - 1, j] == cur:
+                    i = i - 1
+                elif cost[i, j - 1] == cur:
+                    j = j - 1
+                elif cost[i - 1, j - 1] == cur:
+                    i -= 1
+                    j -= 1
+                else:
+                    print("Kuch to gadbad hai at", i, j)
+                    exit(0)
 
-    return cost[m - 1, n - 1] / (m + n)
+        return cost[m - 1, n - 1] / (m + n), path
+
+    else:
+        return cost[m - 1, n - 1] / (m + n)
 
 
 # plot heatmap for visualisation
-def distance_cost_plot(distances):
-    im = plt.imshow(distances, interpolation='none', cmap='Reds')
+def distance_cost_plot(distances, save_path=None):
     plt.gca().invert_yaxis()
     plt.xlabel("X")
     plt.ylabel("Y")
     plt.grid()
     plt.colorbar()
 
+    if save_path is None:
+        plt.imshow(distances, interpolation='none', cmap='Reds')
+        plt.show()
 
-# map points form sequence 1 to sequence 2
+    else:
+        plt.imshow(distances, interpolation='none', cmap='Reds')
+        plt.savefig(save_path)
+
+
+# Plot the path on a grid
+def plot_path(path, save_path=None):
+
+    fig = plt.figure()
+    ax = fig.gca()
+    ax.set_xticks(np.arange(0, path[0][0]+1, 1))
+    ax.set_yticks(np.arange(0, path[0][1]+1, 1))
+
+    plt.plot([x[0] for x in path], [x[1] for x in path], '-o')
+    plt.grid()
+
+    if save_path is None:
+        plt.show()
+    else:
+        plt.savefig(save_path)
+        fig.clf()
+
+
+# map points from sequence 1 to sequence 2
 def show_sim(x, y, path):
     plt.plot(x, 'bo-', label='x')
     plt.plot(y, 'g^-', label='y')
-    plt.legend();
+    plt.legend()
     for (map_x, map_y) in path:
         print(map_x, x[map_x], ":", map_y, y[map_y])
         plt.plot([map_x, map_y], [x[map_x], y[map_y]], 'r')
+        plt.show()
 
 
 if __name__ == '__main__':
-    # a = [1,2,3,4]
-    # b = [1,1,2,2,3,3,4,4]
-    x = np.linspace(0, 6.28, 100)
-    a, b = np.sin(x), np.cos(x)
+    a = [1, 2, 3, 4]
+    b = [1, 1, 2, 2, 3, 3, 4, 4]
+    # x = np.linspace(0, 6.28, 100)
+    # a, b = np.sin(x), np.cos(x)
     # print(a,b)
-    path, cost = dtw_own(a, b)
-    print(cost)
-    show_sim(a, b, path)
-    plt.show()
+    cost, path = dtw_own(a, b, return_path=True)
+    print(cost, path)
+    plot_path(path)
+    # plt.show()

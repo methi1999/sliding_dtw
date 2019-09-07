@@ -9,31 +9,62 @@ import os
 import shutil
 import json
 import pickle
-from dtw_own import dtw_own
+from dtw_own import dtw_own, plot_path
 import matplotlib.pyplot as plt
 import copy
 
-
 samp_rate = 16000
-win_length, hop = 25, 10
-downsample_rate = 16000 // samp_rate
-templates_per_kw = 1
-utter_per_kw = 1
-total_nonkw_utter = 5
-np.random.seed(7)
-keywords = sorted(['rare', 'ambulance', 'money', 'water'])
-kw_path = 'keywords/'
-results_json = 'results/results_8.json'
-roc_pickle_pth = 'results/roc_8.pkl'
-sequence_method = 'own'
+win_length, hop = 30, 15  # in milliseconds
+downsample_rate = 16000 // samp_rate  # if rate != 16000, the sample-level annotations of TIMIT need to be taken care of
+templates_per_kw = 2  # no of templates per keyword
+utter_per_kw = 8  # no of utterances which contain each keyword
+total_nonkw_utter = 170  # total utterances which do not contain any of the keyword
+np.random.seed(7)  # set seed for reproducible results
+keywords = sorted(
+    ["rarely", "reflect", "academic", "program", "national", "movies", "social", "all", "equipment", "fresh"])
+# keywords = ['rare']
+sequence_method = 'own'  # change to not_own to implement threshold detection as mentioned in paper
+
+save_dtw_plots = False  # whether to save dtw plots for comparisons where model failed
+dtw_plots_pth = 'dtw/'  # directory path where dtw graphs are stored
+kw_path = 'keywords/'  # where keywords are stored
+results_json = 'results/results_16.json'  # name of json results
+roc_pickle_pth = 'results/roc_16.pkl'  # temporary dump of ROC values
+
+if not os.path.exists(dtw_plots_pth):
+    os.mkdir(dtw_plots_pth)
 
 
 def listdir(x):
+
     return sorted([x for x in os.listdir(x) if x != '.DS_Store'])
 
 
-def generate_clips_kwds(base_path='../datasets/TIMIT/TRAIN/'):
+def save_dtw_paths(list_of_paths, clip_name, kw_name):
+    """
+    Saves DTW plots for incorrectly classified examples
+    :param list_of_paths: each element of list contains a list of (x,y) coordinates of the DTW path
+    :param clip_name: name of utterance
+    :param kw_name: keyword
+    :return: None. Saves images in the specified directory
+    """
+    if len(list_of_paths) == 0:
+        return
 
+    for i, path in enumerate(list_of_paths):
+        sent_prefix = '_'.join(clip_name.split('.')[-2].split('/')[3:])
+        save_name = dtw_plots_pth + sent_prefix + '_' + kw_name.split('.')[0] + '_' + str(i) + '.png'
+        print(save_name)
+        plot_path(path, save_name)
+
+
+def generate_clips_kwds(base_path='../datasets/TIMIT/TRAIN/'):
+    """
+    Crop out keywords and return a list of non-keyword and keyword utterances
+    :param base_path: base path of TIMIT
+    :return: non_kw_clips is a list of non-keyword utterances from the TIMIT TRAIN dataset
+            kw_clips is a dictionary with key=keyword and value=list of paths to utterances containing the keyword
+    """
     if not os.path.exists(kw_path):
         os.mkdir(kw_path)
     else:
@@ -54,9 +85,11 @@ def generate_clips_kwds(base_path='../datasets/TIMIT/TRAIN/'):
                     with open(bp + file, 'r') as f:
                         dat = f.readlines()
 
+                    # read the word level annotations and crop out the keywords
                     all_dat = [x.strip().split(' ') for x in dat]
                     words = [x[-1] for x in all_dat]
 
+                    # check if words in utterance and keyword have ONE and ONLY ONE keyword
                     inter = set(keywords).intersection(set(words))
                     if len(inter) == 1:
                         cur_keyword = inter.pop()
@@ -71,6 +104,7 @@ def generate_clips_kwds(base_path='../datasets/TIMIT/TRAIN/'):
     kw_templates = {k: [] for k in keywords}
 
     for word, l in kw_clips.items():
+        # choose desired number fo templates and keyword utterances
         idxs = np.random.choice(len(l), utter_per_kw + templates_per_kw)
         for idx in idxs[:utter_per_kw]:
             chosen_kw_clips[word].append(l[idx][0])
@@ -93,11 +127,14 @@ def generate_clips_kwds(base_path='../datasets/TIMIT/TRAIN/'):
     return non_kw_clips[:total_nonkw_utter], chosen_kw_clips
 
 
-# generate_clips()
-# exit(0)
-
 def dist_func(x, y, func='euclidean'):
-
+    """
+    Distance function used for DTW calculations
+    :param x: first vector
+    :param y: second vector
+    :param func: euclidean or cosine
+    :return: distance between the vectors
+    """
     if func == 'euclidean':
         return np.sqrt(np.sum((x - y) ** 2))
     elif func == 'cosine':
@@ -108,15 +145,29 @@ def dist_func(x, y, func='euclidean'):
         exit(0)
 
 
-def sample_to_frame(num, rate=samp_rate, window=win_length, hop=hop):
+def sample_to_frame(num, rate=samp_rate, window=win_length, slide=hop):
+    """
+    Map an audio sample to a frame
+    :param num: sample number
+    :param rate: sampling_rate
+    :param window: window length in ms
+    :param slide: hop in ms
+    :return: frame number
+    e.g. if rate=16000, window=30ms, hop=15ms, then if num=479, frame=0; if num=480, frame=1, etc.
+    """
     multi = rate / 1000
     if num < window * multi:
         return 0
     else:
-        return (num - multi * window) // (multi * hop) + 1
+        return (num - multi * window) // (multi * slide) + 1
 
 
 def sequence_from_thresh(match):
+    """
+    Convert a sequence like [1,2,3,6,8,9,10,11,13,15] into [(1,3),(6),(8,11),(13),(15)]
+    :param match: list of integers
+    :return: collapse sequences into starting frame and ending frame
+    """
     if len(match) == 0:
         print("Couldn't find any audio in input clip")
         exit(0)
@@ -144,69 +195,17 @@ def sequence_from_thresh(match):
     return sequences
 
 
-def proc_one(filename):
-    (rate, sig) = wav.read(filename)
-    assert rate == samp_rate
-    # since templates have max value of 32768, normalise it
-    if sig.max() > 1:
-        sig = sig / 32768
-    sig = sig / max(sig)
-    # calculate mel filterbank energies
-    feat = mfcc(sig, samplerate=samp_rate, winlen=win_length / 1000, winstep=hop / 1000, preemph=0.95, numcep=14,
-                winfunc=np.hamming)
-    return feat
-
-
-# generates the LMD table by DTW calculations
-def compare_all(clip, template):
-
-    temp_l = template.shape[0]
-    clip_l = clip.shape[0]
-    print("Length of template:", temp_l)
-    lower, upper = int(temp_l * 0.5), int(2 * temp_l)  # controlled by the variation in the human speech rate
-    total_tries = clip_l - lower  # number of starting frames to check
-
-    lmd = {}  # key is the starting frame while value is the minimum distance
-
-    # if length of clip < lower_limit*(length of template), total tries = 0
-    if total_tries < 0:
-        total_tries = 1
-
-    distances_matrix = np.zeros((clip_l, temp_l))
-    # calculated distance matrix and feed it to DTW to avoid repeated calculations
-    for i in range(clip_l):
-        for j in range(temp_l):
-            distances_matrix[i, j] = dist_func(clip[i], template[j])
-
-    print("Total starting frames to check:", total_tries)
-
-    for start_frame in range(0, total_tries):
-
-        distances = []
-
-        for length in range(lower, upper + 1):
-
-            if start_frame + length > clip_l:  # Avoid repeated calculations at the end
-                break
-
-            clip_to_check = clip[start_frame:start_frame + length, :]  # consider only a slice of the total clip
-            dtw_cost = dtw_own(clip_to_check, template, distances=distances_matrix[start_frame:start_frame + length, :])
-            distances.append((dtw_cost, length))
-
-        # append minimum distance to table
-        lmd[start_frame] = sorted(distances, key=lambda x: x[0])[0]
-
-        # print progress every 20 frames
-        if start_frame % 20 == 0:
-            print("Starting frame:", start_frame)
-            print("Min distance:", lmd[start_frame])
-
-    return lmd
-
-
-# plot histogram given the LMD table, standard deviation and mode
 def plot_hist(LMD, mode, std, sent=None, kw=None, is_kw=None, path=None):
-
+    """
+    Plot histogram from LMD table generated by sliding DTW
+    :param LMD: lmd dictionary obtained from the previous function
+    :param std: standard deviation
+    :param mode: mode of the data
+    :param sent: name of utterance
+    :param kw: which keyword
+    :param is_kw: true if keyword IS PRESENT in utterance, false otherwise
+    :param path: if one wishes to save the plot, supply appropriate path
+    """
     plt.hist(LMD)
     plt.axvline(x=mode, color='r', label='Mode')
     plt.axvline(x=mode - std, color='g', label='Mode - Std. Dev')
@@ -229,17 +228,117 @@ def plot_hist(LMD, mode, std, sent=None, kw=None, is_kw=None, path=None):
     return std
 
 
-# takes LMD distances table and parameters as input, calculates histogram and outputs
-# True or False (keyword present or not)
-def hist_and_final_result(lmd_dict, std_multi, cons_k, plotting_hist=False, sent=None, kw=None, is_kw=None, path=None):
+def proc_one(filename):
+    """
+    First step which returns MFCC features by reading thw wav file
+    :param filename: path to wav file
+    :return: MFCC features of the signal
+    """
+    (rate, sig) = wav.read(filename)
+    assert rate == samp_rate
+    # since templates have max value of 32768, normalise it
+    if sig.max() > 1:
+        sig = sig / 32768
+    # Normalise so that max-value is 1
+    sig = sig / max(sig)
 
+    # calculate MFCC
+    feat = mfcc(sig, samplerate=samp_rate, winlen=win_length / 1000, winstep=hop / 1000, preemph=0.95, numcep=14,
+                winfunc=np.hamming)
+    # print(sig.shape, feat.shape)
+    return feat
+# generates the LMD table by DTW calculations
+
+
+def compare_all(clip, template):
+    """
+    does sliding-window DTW comaprison of utterance and template and returns a dictionary with
+    key=starting frame of utterance and value=minimum LMD distance, ratio of minimum distance length and template length
+    if save_dtw = True, also returns the actual path of minimum distance
+    :param clip: feature vector of utterance
+    :param template: feature vector of template
+    :return: dictionary with minimum DTW alignment cost, DTW path and ratio of min distance utterance slice and template
+    """
+    temp_l = template.shape[0]
+    clip_l = clip.shape[0]
+    print("Length of template:", temp_l)
+    lower, upper = int(temp_l * 0.5), int(2 * temp_l)  # controlled by the variation in the human speech rate
+    total_tries = clip_l - lower  # number of starting frames to check
+
+    lmd = {}  # key is the starting frame while value is the minimum distance
+
+    # if length of clip < lower_limit*(length of template), total tries = 1. Only one DTW calculation
+    if total_tries < 0:
+        total_tries = 1
+
+    distances_matrix = np.zeros((clip_l, temp_l))
+    # calculated distance matrix and feed it to DTW to avoid repeated calculations
+    for i in range(clip_l):
+        for j in range(temp_l):
+            distances_matrix[i, j] = dist_func(clip[i], template[j])
+
+    print("Total starting frames to check:", total_tries)
+
+    for start_frame in range(0, total_tries):
+
+        distances = []
+
+        for length in range(lower, upper + 1):
+
+            if start_frame + length > clip_l:  # Avoid repeated calculations at the end
+                break
+
+            clip_to_check = clip[start_frame:start_frame + length, :]  # consider only a slice of the total clip
+
+            if save_dtw_plots:
+                dtw_cost, cur_path = dtw_own(clip_to_check, template,
+                                             distances=distances_matrix[start_frame:start_frame + length, :],
+                                             return_path=True)
+                distances.append((dtw_cost, length / temp_l, cur_path))
+            else:
+                dtw_cost = dtw_own(clip_to_check, template,
+                                   distances=distances_matrix[start_frame:start_frame + length, :])
+                distances.append((dtw_cost, length / temp_l))
+
+        # append minimum distance to table
+        lmd[start_frame] = sorted(distances, key=lambda x: x[0])[0]
+
+        # print progress every 20 frames
+        if start_frame % 20 == 0:
+            print("Starting frame:", start_frame)
+            print("Min distance:", lmd[start_frame][:2])
+
+    return lmd
+# plot histogram given the LMD table, standard deviation and mode
+
+
+def hist_and_final_result(lmd_dict, std_multi, cons_k, plotting_hist=False, sent=None, kw=None, is_kw=None, path=None):
+    """
+
+    :param lmd_dict: lmd dictionary obtained from the previous function
+    :param std_multi: multiplier with standard deviation
+    :param cons_k: number of consecutive frames below threshold to look for
+    All the parameters below are true if one wants to simply plot the histogram and see the shape
+    :param plotting_hist: true for viewing the histogram
+    :param sent: name of utterance
+    :param kw: which keyword
+    :param is_kw: true if keyword IS PRESENT in utterance, false otherwise
+    :param path: if one wishes to save the plot, supply appropriate path
+    :return: True if keyword present, False otherwise. If save_dtw, also returns dtw paths for least distance frames
+    """
     if len(lmd_dict.keys()) == 0:
         return False
 
     # calculate values required for histogram plotting
     lmd_dict_costs = {int(k): v[0] for k, v in lmd_dict.items()}
-    lmd_dict_starts = {int(k): v[1] for k, v in lmd_dict.items()}
+    # use below dictionary to analyse the ratio of best aligned DTW
+    # will give an idea about the variation in human speech rate (whether 0.5 to 2 is worth the time)
+    lmd_dict_lengths = {int(k): v[1] for k, v in lmd_dict.items()}
 
+    if save_dtw_plots:
+        lmd_dict_paths = {int(k): v[2] for k, v in lmd_dict.items()}
+
+    # generate histogram
     lmd_list = list(lmd_dict_costs.values())
     hist_data, edges = np.histogram(lmd_list)
 
@@ -247,7 +346,6 @@ def hist_and_final_result(lmd_dict, std_multi, cons_k, plotting_hist=False, sent
     max_id = np.argmax(hist_data)
     mode = (edges[max_id] + edges[max_id + 1]) / 2
 
-    # uncomment this to see the histogram
     if plotting_hist:
         plot_hist(lmd_list, mode, std, sent, kw, is_kw, path)
         return
@@ -255,27 +353,35 @@ def hist_and_final_result(lmd_dict, std_multi, cons_k, plotting_hist=False, sent
     lmd_np = np.ones((max(lmd_dict_costs.keys()) + 1)) * np.inf
     for idx, val in lmd_dict_costs.items():
         lmd_np[idx] = val
-    # find starting frames where min distance is less than threshold
 
     if sequence_method == 'own':
+
+        # find starting frames where min distance is less than threshold
         match = np.where(lmd_np <= mode - std_multi * std)[0]
-        # print(mode, std)
-        # print(match)
         if len(match) == 0:
             # print("No matches found below threshold")
-            return False
+            return False, []
+
         # get sequence from starting frame numbers
         sequences = sequence_from_thresh(match)
-        sequences = [x[1] - x[0] + 1 for x in sequences]
-        # print(sequences)
-        # normalise by template length
-        max_seq = max(sequences)
+        max_id = sorted(sequences, key=lambda x: x[1] - x[0] + 1, reverse=True)[0]
+
+        max_seq = max_id[1] - max_id[0] + 1
 
         if max_seq >= cons_k:
-            return True
-        else:
-            return False
 
+            if save_dtw_plots:
+                cur_dtw_paths = [v for k, v in lmd_dict_paths.items() if max_id[1] <= k <= max_id[0]]
+                return True, cur_dtw_paths
+            else:
+                return True
+        else:
+            if save_dtw_plots:
+                cur_dtw_paths = [v for k, v in lmd_dict_paths.items() if max_id[1] <= k <= max_id[0]]
+                return False, cur_dtw_paths
+            else:
+                return False
+    # method mentioned in the research paper which does not make much sense
     else:
         cur_sum = np.sum(lmd_list[:cons_k + 1])
         if cur_sum > 0:
@@ -290,13 +396,19 @@ def hist_and_final_result(lmd_dict, std_multi, cons_k, plotting_hist=False, sent
 
 
 def testing():
+    """
+    generates testing data, carries out the DTW alignment and stores results in a dictionary
+    key=utterance_name, value = {keyword_1:(lmd, 0/1 depending on whether keyword is present or not), keyword_2:()...}
+    json is constantly dumped to avoid data loss if program crashes
+    """
 
+    # lists which contains paths of keyword and non-keyword utterances
     non_kw_clips, kw_clips = generate_clips_kwds()
-    # print(non_kw, keywords)
 
     non_kw_sent_dict, kw_sent_dict = {}, {}
     templates_dict = {}
 
+    # calculate and store MFCC features in a dictionary
     for kw in listdir(kw_path):
         templates_dict[kw] = proc_one(kw_path + kw)
 
@@ -349,10 +461,16 @@ def testing():
 
 
 def plot_roc():
+    """
+    takes lmd values and stores results in precision-recall format for plotting curves
+    if save_dtw_plots, it also dumps the best path to a png
+    """
 
+    # full=False if only syllable/phone level starting frames are to be used. NOT YET IMPLEMENTED
     full = True
     syl_boundary = 2
 
+    # declare parameters to tune
     if full:
         std_multi = [0.8, 1, 1.3, 1.5, 1.7, 1.9, 2]
         cons = [1, 4, 7, 8, 10, 12, 14]
@@ -368,14 +486,7 @@ def plot_roc():
     else:
 
         if not full:
-            # Read syllables here
-            syl_dict = {}
-            # for line in syllables:
-            #     name, _, start_time, end_time, syl = line.strip().split(' ')
-            #     name = name + '.wav'
-            #     if name not in syl_dict.keys():
-            #         syl_dict[name] = {}
-            #     syl_dict[name][sample_to_frame(int(float(start_time) * 16000))] = syl
+            # Read syllable/phone level-annotations here
 
         roc_struct = {'tp': 0, 'fp': 0, 'tn': 0, 'fn': 0}
         combined_results = {}
@@ -385,6 +496,7 @@ def plot_roc():
             for c in cons:
                 combined_results[s][c] = copy.deepcopy(roc_struct)
 
+        # also make a separate dictionary for individual keyword results
         indi_words_res = {k: copy.deepcopy(combined_results) for k in keywords}
 
         # load results from json
@@ -398,6 +510,8 @@ def plot_roc():
 
             for kw, d in compared_kwds.items():
 
+                # d[0] contains LMD dictionary, d[1] = 0/1 acc. to keyword absent/present respectively
+
                 # if d[1] == 0:
                 # 	print("Comparing non-kw sentence {0} and kw {1}".format(sentence, kw))
                 # else:
@@ -410,23 +524,38 @@ def plot_roc():
                 for s in std_multi:
                     for c in cons:
 
-                        if full:
-                            result = hist_and_final_result(d[0], s, c)
+                        if save_dtw_plots:
+                            if full:
+                                result, dtw_paths = hist_and_final_result(d[0], s, c)
+                            else:
+                                result, dtw_paths = hist_and_final_result(only_syl, s, c)
                         else:
-                            result = hist_and_final_result(only_syl, s, c)
+                            if full:
+                                result = hist_and_final_result(d[0], s, c)
+                            else:
+                                result = hist_and_final_result(only_syl, s, c)
 
                         if d[1] == 1:  # keyword present
 
                             if result == True:
+
                                 combined_results[s][c]['tp'] += 1
                                 indi_words_res[word][s][c]['tp'] += 1
                             else:
+
+                                if save_dtw_plots:
+                                    save_dtw_paths(dtw_paths, sentence, kw)
+
                                 combined_results[s][c]['fn'] += 1
                                 indi_words_res[word][s][c]['fn'] += 1
 
                         else:
                             # print("Saving non keyword")
                             if result == True:
+
+                                if save_dtw_plots:
+                                    save_dtw_paths(dtw_paths, sentence, kw)
+
                                 combined_results[s][c]['fp'] += 1
                                 indi_words_res[word][s][c]['fp'] += 1
                             else:
@@ -472,7 +601,7 @@ def plot_roc():
     plt.show()
     plt.clf()
 
-    # plot individual:
+    # plot individual word-level graphs:
     for keywd, cur_final in indi_words_res.items():
         print("On keyword:", keywd)
         roc_vals = {}
@@ -510,6 +639,12 @@ def plot_roc():
         plt.grid(True)
         plt.show()
         plt.clf()
+
+
+
+if __name__ == '__main__':
+    testing()
+    # plot_roc()
 
 
 def gen_hist(base_path='histograms/'):
@@ -551,11 +686,3 @@ def gen_hist(base_path='histograms/'):
             # std, mode = hist_and_finalresult(only_syl, std_multi, 1, sentence, kw, False, filename)
             # data['absent']['syl'].append(std)
     print(data)
-
-
-# hist_and_finalresult(lmd, 2, 0.5)
-
-if __name__ == '__main__':
-    plot_roc()
-    # testing()
-    # gen_hist()
